@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { BreakerConfig } from './breaker.ts';
+import { hasPrice, type Pricing } from './pricing.ts';
 import { anthropic } from './providers/anthropic.ts';
 import { openaiCompat } from './providers/openai-compat.ts';
 import type { ProviderAdapter } from './providers/types.ts';
@@ -8,6 +9,7 @@ export interface ProviderConfig {
   type: 'anthropic' | 'openai-compat';
   baseUrl: string;
   keyEnv: string;
+  maxTokensOverrun?: number; // billed output can exceed max_tokens by this factor (default 1)
 }
 
 export interface Config {
@@ -15,7 +17,14 @@ export interface Config {
   aliases: Record<string, string[]>;
   timeouts: { perHopMs: number };
   breaker: BreakerConfig;
-  defaults: { maxTokens: number; rpm: number; tpm: number; monthlyBudgetUsd: number };
+  defaults: { maxTokens: number; maxTokensCeiling: number; rpm: number; tpm: number; monthlyBudgetUsd: number };
+}
+
+// Budgets need a price for every hop an alias can land on; catch gaps at startup.
+export function validatePricing(config: Config, pricing: Pricing): void {
+  for (const [alias, chain] of Object.entries(config.aliases)) {
+    for (const hop of chain) if (!hasPrice(pricing, hop)) throw new Error(`Alias "${alias}": no price for "${hop}" in pricing.json`);
+  }
 }
 
 export function loadConfig(path = 'config/gateway.json'): Config {

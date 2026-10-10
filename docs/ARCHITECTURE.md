@@ -32,18 +32,19 @@ One process, one SQLite file. Everything that must survive a restart (keys, budg
 
 ## 3. Request lifecycle
 
-1. **Auth** — `Authorization: Bearer gw_...`. SHA-256 the key, look up `api_keys` → `tenant`. Missing/revoked → `401`.
-2. **Rate limit** — token bucket per tenant for requests/min; a second bucket for tokens/min charged with the estimated input tokens. Empty → `429` + `Retry-After`.
-3. **Budget pre-check** — `spent_this_month + estimated_max_cost > budget` → `402`. Estimated max cost = input tokens estimate × input price + `max_tokens` × output price of the *most expensive* model in the chain. Conservative on purpose.
-4. **Resolve chain** — `model` field: alias (`smart`) → ordered list from config; concrete `provider:model` → chain of one.
-5. **Attempt loop** — for each hop:
+1. **Auth** — `Authorization: Bearer gw_...`. SHA-256 the key, look up `api_keys` → `tenant` (with its limits). Missing/revoked → `401`.
+2. **Validate** — every request gets an explicit `max_tokens` (client value or config default, capped by `maxTokensCeiling`), because the budget reserves against it.
+3. **Resolve chain** — `model` field: alias (`smart`) → ordered list from config; concrete `provider:model` → chain of one. Every hop must have a price → otherwise `400 model_not_priced`.
+4. **Rate limit** — token bucket per tenant for requests/min; a second bucket for tokens/min, charged with the estimated input tokens now and the actual output after the response. Empty → `429` + `Retry-After`.
+5. **Reserve budget** — worst-case cost (see Budget accounting) is booked against the month's spend in one SQL transaction. Doesn't fit → `402`, no provider is called.
+6. **Attempt loop** — for each hop:
    - breaker open → skip (counts as a skipped hop, not an attempt)
    - call adapter with per-hop timeout
    - success → record breaker success, break
    - retryable error → record breaker failure, next hop
    - non-retryable error → return it to client immediately (it would fail on every provider)
-6. **All hops failed** → `503` with the list of attempts in the body.
-7. **Record** — insert ledger row; add actual cost to the tenant's month spend (single SQL transaction).
+7. **All hops failed** → `503` with the list of attempts in the body.
+8. **Settle** — insert the ledger row and replace the reservation with the actual cost of the hop that answered (0 on failure), in one SQL transaction.
 
 ## 4. Components (`src/`)
 
@@ -53,7 +54,8 @@ src/
   config.ts            load + validate gateway.json and env
   auth.ts              key hashing, lookup middleware
   ratelimit.ts         token bucket (in memory, per tenant)
-  budget.ts            estimate, pre-check, charge
+  budget.ts            input-token estimate, worst-case cost across a chain
+  pricing.ts           price lookup (dated periods, long-context tiers) → micro-dollars
   router.ts            chain resolution + attempt loop
   breaker.ts           circuit breaker per provider:model
   errors.ts            error classification (retryable or not)
@@ -101,11 +103,15 @@ The adapter's async iterator is pulled until the **first content chunk** arrives
 
 ### Budget accounting
 - Month spend in `tenant_spend(tenant_id, period, usd_micros)`; money stored as integer **micro-dollars**, never floats.
-- Pre-check is conservative (max tokens × most expensive hop); charge is actual usage.
-- Overshoot is bounded by concurrent in-flight requests — documented, tested, acceptable for v1. Fully strict would require reserving cost before the call (v2 option: reserve → settle).
+- **Reserve → settle.** Before calling any provider, the worst-case cost is added to the month's spend; after the response it is swapped for the actual cost. Concurrent requests therefore can't overshoot the budget (tested with 50 concurrent requests).
+- Worst case = input estimate (~3 chars/token, deliberately high) × input price + `max_tokens × maxTokensOverrun` × output price, maximised over every hop in the chain.
+- `maxTokensOverrun` (per provider, default 1): Gemini sometimes bills more output than `max_tokens` because of thinking tokens (observed 76 billed for `max_tokens: 50`), so `google` is configured at 2. Anthropic honours `max_tokens` exactly.
+- Consequence: a request is admitted only if its *worst case* fits in the remaining budget. A tenant with little budget left gets `402` for large `max_tokens` but can still send smaller requests.
+- Residual risk: the budget can still be exceeded if the input estimate is too low (e.g. text that tokenizes very densely) or a provider overruns past its factor. The overshoot is limited to that one request.
+- Prices live in `config/pricing.json`, copied from provider pricing pages with the date checked. Periods with a `from` date handle announced price changes (Gemini 3.6 Flash doubles on 2027-01-01); `longContext` handles prompt-length tiers (Claude Haiku 5.5 above 100k tokens). Startup fails if any alias hop has no price.
 
 ### Rate limiting
-In-memory token bucket per tenant. Correct for one instance. Multi-instance needs Redis (v2) — the interface is a single `take(tenantId, n)` function so swapping the backend touches one file.
+In-memory token bucket per tenant (requests/min and tokens/min). Buckets can go negative: tokens/min takes the input estimate up front and charges actual usage afterwards, so a tenant that used more than estimated waits for the refill. A request whose input alone exceeds the tokens/min limit is rejected with `400` (it could never fit). Correct for one instance; multi-instance needs Redis (v2), and only `ratelimit.ts` changes.
 
 ## 6. Data model (SQLite)
 
@@ -124,15 +130,15 @@ requests     (id TEXT PK, tenant_id TEXT, alias TEXT, provider TEXT, model TEXT,
 {
   "providers": {
     "anthropic":  { "type": "anthropic",     "baseUrl": "https://api.anthropic.com", "keyEnv": "ANTHROPIC_API_KEY" },
-    "google":     { "type": "openai-compat", "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai", "keyEnv": "GEMINI_API_KEY" }
+    "google":     { "type": "openai-compat", "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai", "keyEnv": "GEMINI_API_KEY", "maxTokensOverrun": 2 }
   },
   "aliases": {
-    "smart": ["anthropic:claude-sonnet-5-5", "google:gemini-3.5-flash"],
+    "smart": ["anthropic:claude-sonnet-5-5", "google:gemini-3.6-flash"],
     "fast":  ["anthropic:claude-haiku-5-5", "google:gemini-3.1-flash-lite"]
   },
   "timeouts": { "perHopMs": 30000, "firstTokenMs": 10000 },
   "breaker":  { "window": 20, "minFailures": 5, "failureRate": 0.5, "openMs": 30000 },
-  "defaults": { "rpm": 60, "tpm": 100000, "monthlyBudgetUsd": 50 }
+  "defaults": { "maxTokens": 1024, "maxTokensCeiling": 8192, "rpm": 60, "tpm": 100000, "monthlyBudgetUsd": 50 }
 }
 ```
 Gemini Pro models need a paid Gemini API tier; the free tier returns `429` with `limit: 0`. Upgrade the `smart` backup hop once billing is enabled.
@@ -170,3 +176,6 @@ Errors use the OpenAI error shape: `{ "error": { "message", "type", "code" } }`.
 | 2026-10-10 | Providers for v1: Anthropic + Google Gemini (via its OpenAI-compatible endpoint) | OpenAI as second provider: kept as config-only option; Gemini needs no extra adapter |
 | 2026-10-10 | Gemini backups: `gemini-3.5-flash` (smart), `gemini-3.1-flash-lite` (fast) | `gemini-3.8-flash`: returned 503 "high demand" during M1 smoke test; Gemini Pro: not available on the free tier |
 | 2026-10-10 | Breaker may trip on partial (~30%) failure; accepted and documented | Larger sample size (slower detection of dead providers); last-resort retry of open circuits (a hung provider costs the full timeout) |
+| 2026-10-10 | Budgets use reserve → settle in v1 (was planned for v2) | Check-then-charge: concurrent requests could overshoot; reserve → settle is a few lines with single-process SQLite |
+| 2026-10-10 | Per-provider `maxTokensOverrun` factor in the reservation (google = 2) | Trust `max_tokens`: Gemini billed 76 output tokens for `max_tokens: 50` |
+| 2026-10-10 | Gemini smart backup moved to `gemini-3.6-flash` | `gemini-3.5-flash`: no longer on Google's pricing page, so its cost can't be computed |

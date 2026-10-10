@@ -5,6 +5,7 @@
 import { createBreakers } from '../src/breaker.ts';
 import type { Config } from '../src/config.ts';
 import { openDb } from '../src/db.ts';
+import type { Pricing } from '../src/pricing.ts';
 import { fake, type FakeOptions } from '../src/providers/fake.ts';
 import { createApp } from '../src/server.ts';
 
@@ -37,8 +38,10 @@ const config: Config = {
   aliases: { smart: ['primary:model-a', 'backup:model-b'] },
   timeouts: { perHopMs: PER_HOP_MS },
   breaker: BREAKER,
-  defaults: { maxTokens: 1024, rpm: 1e9, tpm: 1e12, monthlyBudgetUsd: 1e6 },
+  defaults: { maxTokens: 1024, maxTokensCeiling: 8192, rpm: 1e9, tpm: 1e12, monthlyBudgetUsd: 1e6 },
 };
+
+const pricing: Pricing = { 'primary:model-a': [{ input: 1, output: 1 }], 'backup:model-b': [{ input: 1, output: 1 }] };
 
 const BODY = JSON.stringify({ model: 'smart', messages: [{ role: 'user', content: 'hi' }] });
 
@@ -61,9 +64,9 @@ async function viaGateway(s: Scenario) {
   const primary = fake(s.primary);
   const backup = fake({ seed: 3, ...s.backup });
   const db = openDb(':memory:');
-  const key = db.createKey(db.createTenant('bench', config.defaults));
+  const { key } = db.createKey(db.createTenant('bench', config.defaults));
   const breakerCfg = s.breaker === false ? { ...BREAKER, minFailures: Infinity } : BREAKER;
-  const app = createApp({ config, db, adapters: { primary, backup }, breakers: createBreakers(breakerCfg), log: false });
+  const app = createApp({ config, pricing, db, adapters: { primary, backup }, breakers: createBreakers(breakerCfg), log: false });
 
   let ok = 0;
   let attempts = 0;

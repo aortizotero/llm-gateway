@@ -2,7 +2,7 @@
 
 Self-hosted, OpenAI-compatible gateway for running LLMs in production across teams or customers: per-tenant keys, budgets and rate limits, provider fallback with circuit breakers, and a real-time cost ledger.
 
-> Status: **M2 (resilience) done** — OpenAI-compatible endpoint, Anthropic + Google Gemini adapters, per-tenant hashed keys, usage ledger, provider fallback chains with circuit breakers. Budgets and rate limits come in M3. Design docs: [`PRD`](docs/PRD.md) · [`Architecture`](docs/ARCHITECTURE.md) · [`Rules`](docs/RULES.md) · [`Use cases`](docs/USE_CASES.md).
+> Status: **M3 (governance) done** — OpenAI-compatible endpoint, Anthropic + Google Gemini adapters, provider fallback with circuit breakers, per-tenant keys, rate limits and strict monthly budgets, real-time cost ledger, admin API. Streaming comes in M4. Design docs: [`PRD`](docs/PRD.md) · [`Architecture`](docs/ARCHITECTURE.md) · [`Rules`](docs/RULES.md) · [`Use cases`](docs/USE_CASES.md).
 
 ## Quick start
 
@@ -18,7 +18,7 @@ Create a `.env` file in the project root:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | yes | Anthropic provider |
 | `GEMINI_API_KEY` | yes | Google Gemini provider |
-| `GATEWAY_ADMIN_KEY` | from M3 | Protects `/admin/*` routes |
+| `GATEWAY_ADMIN_KEY` | for the admin API | Protects `/admin/*`; the admin API is disabled when unset |
 | `DB_PATH` | no | SQLite file, default `data/gateway.db` |
 | `PORT` | no | Default `8787` |
 
@@ -48,6 +48,39 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8787/v1", api_key="gw_...")
 ```
 
+Every proxied response carries `x-gateway-provider` (who answered), `x-gateway-attempts` and `x-gateway-cost-usd`.
+
+## Tenants, budgets and rate limits
+
+Each tenant (one per customer account in the B2B bot-fleet scenario) has its own keys, a monthly USD budget, and requests/min + tokens/min limits.
+
+```bash
+ADMIN="Authorization: Bearer $GATEWAY_ADMIN_KEY"
+
+# Create a tenant (defaults from config/gateway.json for anything omitted)
+curl -X POST localhost:8787/admin/tenants -H "$ADMIN" -H "Content-Type: application/json" \
+  -d '{"name": "Acme Corp", "monthlyBudgetUsd": 200, "rpm": 120}'
+
+# Issue a key (returned once), revoke a key, change limits
+curl -X POST   localhost:8787/admin/tenants/<tenant-id>/keys -H "$ADMIN"
+curl -X DELETE localhost:8787/admin/keys/<key-id> -H "$ADMIN"
+curl -X PATCH  localhost:8787/admin/tenants/<tenant-id> -H "$ADMIN" -H "Content-Type: application/json" -d '{"monthlyBudgetUsd": 500}'
+
+# Spend this month, broken down by provider and model; circuit breaker states
+curl "localhost:8787/admin/usage?tenant=<tenant-id>&period=2026-10" -H "$ADMIN"
+curl localhost:8787/admin/breakers -H "$ADMIN"
+```
+
+| Situation | Response |
+|---|---|
+| Over requests/min or tokens/min | `429` + `Retry-After` |
+| Worst-case cost of the request doesn't fit in the remaining budget | `402`, no provider called |
+| Every provider in the chain failed | `503` with the attempt trail |
+
+**How budgets stay strict.** Before calling a provider, the gateway reserves the request's worst-case cost (input estimate + `max_tokens`, at the most expensive model in the fallback chain) and swaps it for the actual cost afterwards. Fifty concurrent requests against a small budget admit exactly as many as fit, never more (see `test/governance.test.ts`). Gemini sometimes bills more than `max_tokens` because of thinking tokens (76 for a limit of 50 in testing), so its reservations use a 2× overrun factor.
+
+Prices come from `config/pricing.json`, copied from each provider's pricing page with the date checked, including announced price changes and long-context tiers.
+
 ## Tests
 
 ```bash
@@ -66,16 +99,16 @@ Tests use a fake provider and never call real APIs.
 
 | Scenario | Success, direct to primary | Success via gateway | Calls to primary | Avg attempts | p50 | p95 | p99 |
 |---|---|---|---|---|---|---|---|
-| Both providers healthy | 100.0% | 100.0% | 2000 | 1.00 | 1.5 ms | 3.3 ms | 6.8 ms |
-| Primary 30% errors (503) | 70.2% | 100.0% | 39 | 1.01 | 1.4 ms | 2.3 ms | 2.9 ms |
-| Primary 30% errors, backup 10% errors | 70.2% | 89.8% | 39 | 1.01 | 1.6 ms | 2.1 ms | 3.1 ms |
-| Primary fully down (503) | 0.0% | 100.0% | 20 | 1.01 | 1.1 ms | 1.4 ms | 3.4 ms |
-| Primary hangs, breaker on | 0.0% | 100.0% | 24 | 1.01 | 0.1 ms | 0.2 ms | 205.0 ms |
-| Primary hangs, breaker off | 0.0% | 100.0% | 2000 | 2.00 | 206.6 ms | 208.4 ms | 212.3 ms |
+| Both providers healthy | 100.0% | 100.0% | 2000 | 1.00 | 2.1 ms | 4.1 ms | 8.9 ms |
+| Primary 30% errors (503) | 70.2% | 100.0% | 39 | 1.01 | 2.1 ms | 3.1 ms | 4.0 ms |
+| Primary 30% errors, backup 10% errors | 70.2% | 89.8% | 39 | 1.01 | 2.4 ms | 3.1 ms | 4.3 ms |
+| Primary fully down (503) | 0.0% | 100.0% | 20 | 1.01 | 1.8 ms | 2.2 ms | 3.7 ms |
+| Primary hangs, breaker on | 0.0% | 100.0% | 24 | 1.01 | 0.2 ms | 0.3 ms | 220.1 ms |
+| Primary hangs, breaker off | 0.0% | 100.0% | 2000 | 2.00 | 206.4 ms | 208.7 ms | 214.5 ms |
 
 **Reading it**
 
-- **Overhead:** with healthy providers the gateway adds 3.3 ms at p95 (auth, routing, SQLite ledger write).
+- **Overhead:** with healthy providers the gateway adds 4.1 ms at p95 (auth, rate limiting, budget reservation and settlement, ledger write — two SQLite transactions per request).
 - **Primary fully down:** 0% → 100%. Only 20 requests ever reach the dead provider: the ones already in flight (concurrency 20) when the breaker opened.
-- **Primary hangs:** without a breaker every request pays the full timeout before falling back (p50 207 ms; with a production 30 s timeout that is 30 s per request). With the breaker, only the first 24 do, and p95 drops to 0.2 ms.
+- **Primary hangs:** without a breaker every request pays the full timeout before falling back (p50 207 ms; with a production 30 s timeout that is 30 s per request). With the breaker, only the first 24 do, and p95 drops to 0.3 ms.
 - **The trade-off (row 3):** a 50% threshold on a 20-request window sometimes trips on a provider with only 30% errors, because short bursts of failures happen by chance. Once it trips, traffic moves to the backup, and the backup's own 10% errors have no hop left. Success is 89.8%, where trying both providers on every request would give ~97%. The breaker trades a little success under partial failure for big latency wins under hard failure.

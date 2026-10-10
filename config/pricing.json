@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "unit": "USD per 1M tokens",
+    "checked": "2026-10-10",
+    "sources": [
+      "https://platform.claude.com/docs/en/about-claude/pricing",
+      "https://ai.google.dev/gemini-api/docs/pricing"
+    ],
+    "notes": "Each model has a list of price periods; the latest one whose 'from' date has passed applies. 'longContext' applies when the prompt has more than 'aboveInputTokens' tokens. Gemini output prices include thinking tokens."
+  },
+  "anthropic:claude-sonnet-5-5": [{ "input": 2, "output": 10 }],
+  "anthropic:claude-haiku-5-5": [
+    { "input": 0.1, "output": 0.5, "longContext": { "aboveInputTokens": 100000, "input": 0.5, "output": 2.5 } }
+  ],
+  "google:gemini-3.6-flash": [
+    { "input": 0.75, "output": 3.75 },
+    { "from": "2027-01-01", "input": 1.5, "output": 7.5 }
+  ],
+  "google:gemini-3.1-flash-lite": [{ "input": 0.25, "output": 1.5 }]
+}

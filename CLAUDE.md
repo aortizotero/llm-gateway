@@ -30,4 +30,6 @@ Node ≥ 24 + TypeScript with no build step (native type stripping), `hono`, `no
 - Known: Gemini Pro needs a paid tier (smart backup uses `gemini-3.5-flash` meanwhile). `gemini-3.8-flash` was overloaded (503) during M1.
 - **M2 done**: fallback across the alias chain, circuit breaker per `provider:model` (`src/breaker.ts`), `x-gateway-provider` / `x-gateway-attempts` headers, 503 with attempt trail when every hop fails, chaos bench (`bench/chaos.ts`, results in README). 25 tests pass.
 - Decision: the breaker can trip on a provider with ~30% errors. Kept as is and documented as a trade-off in the README (rejected: larger sample size = slower detection; last-resort retry of open circuits = a hung provider costs the full timeout).
-- Next: M3 (rate limits, budgets, pricing, admin API).
+- **M3 done**: pricing (`config/pricing.json` + `src/pricing.ts`, dated periods and long-context tiers), rate limits (`src/ratelimit.ts`), strict budgets via reserve → settle (`db.reserve` / `db.settle`), per-provider `maxTokensOverrun` (google = 2), admin API (`src/admin.ts`), `x-gateway-cost-usd`. 49 tests pass; smoke-tested against real providers.
+- Prices last checked 2026-10-10. Gemini 3.6 Flash doubles on 2027-01-01 (already encoded). `gemini-3.5-flash` disappeared from Google's pricing page → smart backup is `gemini-3.6-flash`.
+- Next: M4 (streaming with fallback before the first token).

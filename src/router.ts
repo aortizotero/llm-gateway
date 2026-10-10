@@ -84,6 +84,8 @@ export async function route(
     }
   }
 
-  const tried = attempts ? `all ${attempts} attempted providers failed` : 'every provider circuit is open';
+  const tried = attempts
+    ? `all ${attempts} attempted providers failed; last error: ${lastError?.message}`
+    : 'every provider circuit is open';
   return { hop: last, attempts, trail, error: new ProviderError(503, `No provider available: ${tried}`) };
 }

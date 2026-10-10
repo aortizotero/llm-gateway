@@ -1,13 +1,13 @@
 {
   "providers": {
     "anthropic": { "type": "anthropic", "baseUrl": "https://api.anthropic.com", "keyEnv": "ANTHROPIC_API_KEY" },
-    "google": { "type": "openai-compat", "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai", "keyEnv": "GEMINI_API_KEY" }
+    "google": { "type": "openai-compat", "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai", "keyEnv": "GEMINI_API_KEY", "maxTokensOverrun": 2 }
   },
   "aliases": {
-    "smart": ["anthropic:claude-sonnet-5-5", "google:gemini-3.5-flash"],
+    "smart": ["anthropic:claude-sonnet-5-5", "google:gemini-3.6-flash"],
     "fast": ["anthropic:claude-haiku-5-5", "google:gemini-3.1-flash-lite"]
   },
   "timeouts": { "perHopMs": 30000 },
   "breaker": { "window": 20, "minFailures": 5, "failureRate": 0.5, "openMs": 30000 },
-  "defaults": { "maxTokens": 1024, "rpm": 60, "tpm": 100000, "monthlyBudgetUsd": 50 }
+  "defaults": { "maxTokens": 1024, "maxTokensCeiling": 8192, "rpm": 60, "tpm": 100000, "monthlyBudgetUsd": 50 }
 }

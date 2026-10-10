@@ -1,39 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createBreakers } from '../src/breaker.ts';
-import type { Config } from '../src/config.ts';
-import { openDb } from '../src/db.ts';
 import { fake } from '../src/providers/fake.ts';
-import type { ProviderAdapter } from '../src/providers/types.ts';
-import { createApp } from '../src/server.ts';
-
-const config: Config = {
-  providers: {
-    primary: { type: 'openai-compat', baseUrl: 'http://unused', keyEnv: 'UNUSED' },
-    backup: { type: 'openai-compat', baseUrl: 'http://unused', keyEnv: 'UNUSED' },
-  },
-  aliases: { smart: ['primary:model-a', 'backup:model-b'] },
-  timeouts: { perHopMs: 100 },
-  breaker: { window: 20, minFailures: 5, failureRate: 0.5, openMs: 30000 },
-  defaults: { maxTokens: 1024, rpm: 60, tpm: 100000, monthlyBudgetUsd: 50 },
-};
-
-function setup(adapters: Record<string, ProviderAdapter> = { primary: fake(), backup: fake() }) {
-  const db = openDb(':memory:');
-  const key = db.createKey(db.createTenant('Acme', config.defaults));
-  const app = createApp({ config, db, adapters, breakers: createBreakers(config.breaker), log: false });
-  const call = (body: unknown, auth = `Bearer ${key}`) =>
-    app.request('/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: auth },
-      body: JSON.stringify(body),
-    });
-  const ledger = () => db.raw.prepare('SELECT * FROM requests').all() as Record<string, unknown>[];
-  return { call, ledger };
-}
-
-const chat = (model = 'smart') => ({ model, messages: [{ role: 'user', content: 'hi' }] });
-const down = (failStatus = 503) => fake({ failRate: 1, failStatus });
+import { chat, down, setup } from './helpers.ts';
 
 test('rejects missing and unknown keys with 401', async () => {
   const { call } = setup();
