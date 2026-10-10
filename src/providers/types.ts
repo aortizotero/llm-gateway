@@ -38,6 +38,22 @@ export interface ChatResponse {
   usage: Usage;
 }
 
+// OpenAI chat.completion.chunk. Adapters yield content chunks without usage, then exactly one
+// final chunk with `choices: []` and the billable usage (the shape OpenAI uses for include_usage).
+export interface StreamChunk {
+  id: string;
+  object: 'chat.completion.chunk';
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    delta: { role?: 'assistant'; content?: string | null; [key: string]: unknown };
+    finish_reason: string | null;
+  }>;
+  usage?: Usage;
+}
+
 export interface ProviderAdapter {
   chat(req: ChatRequest, signal: AbortSignal): Promise<ChatResponse>;
+  stream(req: ChatRequest, signal: AbortSignal): AsyncIterable<StreamChunk>;
 }

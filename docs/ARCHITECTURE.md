@@ -65,7 +65,8 @@ src/
     types.ts           ChatRequest / ChatResponse / StreamChunk (OpenAI shape)
     openai-compat.ts   passthrough for any OpenAI-compatible API (Google Gemini; OpenAI/OpenRouter optional)
     anthropic.ts       OpenAI ⇄ Anthropic Messages translation, incl. SSE events
-    fake.ts            configurable failure rate + latency, for tests and chaos bench
+    sse.ts             server-sent events parser shared by the streaming adapters
+    fake.ts            configurable failures, latency, mid-stream cuts; for tests and the chaos bench
 bench/
   chaos.ts             runs N requests against the gateway with fake providers, prints table
 test/
@@ -99,7 +100,12 @@ Internal shape = OpenAI chat completions. Each adapter translates to/from its pr
 Per `provider:model`. Rolling window of the last 20 outcomes. Opens when ≥ 5 failures **and** failure rate ≥ 50%. Stays open 30 s, then half-open: lets exactly one probe through; success closes, failure re-opens. All numbers in `config/gateway.json`. With concurrent traffic, up to `concurrency` requests can reach a dead provider before the circuit opens (they were in flight when the failures were recorded).
 
 ### Streaming fallback
-The adapter's async iterator is pulled until the **first content chunk** arrives *before* writing SSE headers' body to the client. An error before that point → next hop, invisible to the client. After the first chunk is flushed, an error is sent as a final SSE `error` event and the stream closes. This is the only correct behaviour: you cannot un-send tokens.
+`routeStream()` pulls each hop's stream until its **first real output** (content, a finish reason, or usage); role-only chunks are buffered. Nothing has been sent to the client yet, so an error — or no output within `timeouts.firstTokenMs` — moves on to the next hop invisibly. Once a hop produces output the gateway commits: response headers and the buffered chunks go out, and from then on `timeouts.perHopMs` is the maximum silence between chunks. A failure after that point is sent as a final SSE `data: {"error": ...}` event (no `[DONE]`) and is never retried: you cannot un-send tokens. If every hop fails before committing, the client gets the same JSON `503` as a non-streaming request.
+
+- **Usage.** Adapters always ask the provider for usage and emit exactly one final chunk with `choices: []` and the billable usage. Gemini repeats a cumulative usage on every chunk, so `normalizeStream()` keeps the latest. The usage chunk reaches the client only if it sent `stream_options.include_usage`; `stream_options` itself is never forwarded upstream.
+- **Billing a cut stream.** When usage is unknown because the stream ended early (mid-stream provider failure → ledger status `502`; client disconnect → `499`, upstream call aborted), the tenant is charged the full reservation. The provider may have billed partial output, so charging less could under-charge.
+- `x-gateway-cost-usd` is not sent on streams: headers leave before the cost is known. The cost is in the ledger.
+- `providers/sse.ts` is a ~30-line SSE parser shared by both adapters (buffers across network chunks, handles CRLF).
 
 ### Budget accounting
 - Month spend in `tenant_spend(tenant_id, period, usd_micros)`; money stored as integer **micro-dollars**, never floats.
@@ -179,3 +185,5 @@ Errors use the OpenAI error shape: `{ "error": { "message", "type", "code" } }`.
 | 2026-10-10 | Budgets use reserve → settle in v1 (was planned for v2) | Check-then-charge: concurrent requests could overshoot; reserve → settle is a few lines with single-process SQLite |
 | 2026-10-10 | Per-provider `maxTokensOverrun` factor in the reservation (google = 2) | Trust `max_tokens`: Gemini billed 76 output tokens for `max_tokens: 50` |
 | 2026-10-10 | Gemini smart backup moved to `gemini-3.6-flash` | `gemini-3.5-flash`: no longer on Google's pricing page, so its cost can't be computed |
+| 2026-10-10 | Streaming commits on first real output; separate `firstTokenMs` and idle (`perHopMs`) timeouts | One total timeout: would either kill long answers or wait too long for a dead provider |
+| 2026-10-10 | Cut streams (502/499) are charged the full reservation | Charge 0 or estimate from streamed text: providers bill partial output, and thinking tokens are invisible |

@@ -15,7 +15,7 @@ export interface ProviderConfig {
 export interface Config {
   providers: Record<string, ProviderConfig>;
   aliases: Record<string, string[]>;
-  timeouts: { perHopMs: number };
+  timeouts: { perHopMs: number; firstTokenMs: number };
   breaker: BreakerConfig;
   defaults: { maxTokens: number; maxTokensCeiling: number; rpm: number; tpm: number; monthlyBudgetUsd: number };
 }

@@ -96,7 +96,6 @@ test('unknown model is a 404', async () => {
 
 test('unsupported features and bad bodies are 400', async () => {
   const { call } = setup();
-  assert.equal((await call({ ...chat(), stream: true })).status, 400);
   assert.equal((await call({ ...chat(), tools: [] })).status, 400);
   assert.equal((await call({ model: 'smart', messages: [] })).status, 400);
 });

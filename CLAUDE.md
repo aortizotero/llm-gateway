@@ -32,4 +32,6 @@ Node ≥ 24 + TypeScript with no build step (native type stripping), `hono`, `no
 - Decision: the breaker can trip on a provider with ~30% errors. Kept as is and documented as a trade-off in the README (rejected: larger sample size = slower detection; last-resort retry of open circuits = a hung provider costs the full timeout).
 - **M3 done**: pricing (`config/pricing.json` + `src/pricing.ts`, dated periods and long-context tiers), rate limits (`src/ratelimit.ts`), strict budgets via reserve → settle (`db.reserve` / `db.settle`), per-provider `maxTokensOverrun` (google = 2), admin API (`src/admin.ts`), `x-gateway-cost-usd`. 49 tests pass; smoke-tested against real providers.
 - Prices last checked 2026-10-10. Gemini 3.6 Flash doubles on 2027-01-01 (already encoded). `gemini-3.5-flash` disappeared from Google's pricing page → smart backup is `gemini-3.6-flash`.
-- Next: M4 (streaming with fallback before the first token).
+- **M4 done**: streaming (`routeStream` in `src/router.ts`, `providers/sse.ts`, `stream()` on every adapter), fallback before the first real output, `firstTokenMs` + idle timeouts, cut streams charged the full reservation (ledger 502 / 499). 62 tests pass; smoke-tested against both providers incl. client disconnect.
+- Gotcha: when smoke-testing streams by hand, parse SSE with `src/providers/sse.ts`. A naive split-by-line client drops lines cut across network chunks (caused a false "gateway drops chunks" alarm in M4).
+- Next: M5 (healthz/readyz, Dockerfile, deploy, final README).

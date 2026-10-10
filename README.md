@@ -2,7 +2,7 @@
 
 Self-hosted, OpenAI-compatible gateway for running LLMs in production across teams or customers: per-tenant keys, budgets and rate limits, provider fallback with circuit breakers, and a real-time cost ledger.
 
-> Status: **M3 (governance) done** — OpenAI-compatible endpoint, Anthropic + Google Gemini adapters, provider fallback with circuit breakers, per-tenant keys, rate limits and strict monthly budgets, real-time cost ledger, admin API. Streaming comes in M4. Design docs: [`PRD`](docs/PRD.md) · [`Architecture`](docs/ARCHITECTURE.md) · [`Rules`](docs/RULES.md) · [`Use cases`](docs/USE_CASES.md).
+> Status: **M4 (streaming) done** — OpenAI-compatible endpoint with streaming, Anthropic + Google Gemini adapters, provider fallback with circuit breakers (also for streams, before the first token), per-tenant keys, rate limits and strict monthly budgets, real-time cost ledger, admin API. Packaging and deployment come in M5. Design docs: [`PRD`](docs/PRD.md) · [`Architecture`](docs/ARCHITECTURE.md) · [`Rules`](docs/RULES.md) · [`Use cases`](docs/USE_CASES.md).
 
 ## Quick start
 
@@ -48,7 +48,13 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8787/v1", api_key="gw_...")
 ```
 
-Every proxied response carries `x-gateway-provider` (who answered), `x-gateway-attempts` and `x-gateway-cost-usd`.
+Every proxied response carries `x-gateway-provider` (who answered), `x-gateway-attempts` and, for non-streaming calls, `x-gateway-cost-usd`.
+
+### Streaming
+
+`"stream": true` works as with OpenAI (server-sent events ending in `data: [DONE]`). Fallback still applies, but only **before the first token**: the gateway reads each provider until it produces real output, so a provider that errors or stays silent past `firstTokenMs` is skipped without the client noticing. After the first token is sent, a provider failure ends the stream with an error event; it cannot be retried without sending duplicate text.
+
+> **Gemini thinking models and `max_tokens`:** thinking tokens count against `max_tokens`. With `max_tokens: 300`, `gemini-3.6-flash` spent 303 tokens thinking and returned an empty answer, which was still billed. Give Gemini a generous `max_tokens`.
 
 ## Tenants, budgets and rate limits
 

@@ -1,5 +1,6 @@
-import { errorFromResponse, GatewayError, toProviderError } from '../errors.ts';
-import type { ChatMessage, ChatRequest, ChatResponse, ProviderAdapter } from './types.ts';
+import { errorFromResponse, GatewayError, ProviderError, toProviderError } from '../errors.ts';
+import { parseSse, type SseEvent } from './sse.ts';
+import type { ChatMessage, ChatRequest, ChatResponse, ProviderAdapter, StreamChunk } from './types.ts';
 
 const FINISH_REASONS: Record<string, string> = {
   end_turn: 'stop',
@@ -74,23 +75,87 @@ export function fromAnthropic(res: AnthropicResponse): ChatResponse {
   };
 }
 
+// Anthropic reports errors mid-stream as an `error` event with a type, not an HTTP status.
+const STREAM_ERROR_STATUS: Record<string, number> = {
+  overloaded_error: 529,
+  rate_limit_error: 429,
+  api_error: 500,
+  invalid_request_error: 400,
+  authentication_error: 401,
+  permission_error: 403,
+  not_found_error: 404,
+};
+
+// Anthropic SSE (message_start → content_block_delta* → message_delta → message_stop) → OpenAI chunks.
+export async function* fromAnthropicStream(events: AsyncIterable<SseEvent>): AsyncGenerator<StreamChunk> {
+  let id = '';
+  let model = '';
+  let input = 0;
+  let output = 0;
+  const created = Math.floor(Date.now() / 1000);
+  const chunk = (delta: StreamChunk['choices'][0]['delta'], finish: string | null = null): StreamChunk => ({
+    id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finish }],
+  });
+
+  for await (const ev of events) {
+    const data = JSON.parse(ev.data);
+    switch (data.type) {
+      case 'message_start': {
+        id = data.message.id;
+        model = data.message.model;
+        const u = data.message.usage ?? {};
+        input = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+        output = u.output_tokens ?? 0;
+        yield chunk({ role: 'assistant', content: '' });
+        break;
+      }
+      case 'content_block_delta':
+        if (data.delta?.type === 'text_delta') yield chunk({ content: data.delta.text });
+        break;
+      case 'message_delta':
+        output = data.usage?.output_tokens ?? output;
+        yield chunk({}, data.delta?.stop_reason ? (FINISH_REASONS[data.delta.stop_reason] ?? 'stop') : null);
+        break;
+      case 'error':
+        throw new ProviderError(
+          STREAM_ERROR_STATUS[data.error?.type] ?? 500,
+          `anthropic stream error: ${data.error?.type}: ${data.error?.message}`,
+        );
+    }
+  }
+  yield { ...chunk({}), choices: [], usage: { prompt_tokens: input, completion_tokens: output, total_tokens: input + output } };
+}
+
 export function anthropic(baseUrl: string, apiKey: string, defaultMaxTokens: number): ProviderAdapter {
+  const post = async (body: Record<string, unknown>, signal: AbortSignal): Promise<Response> => {
+    let res: Response;
+    try {
+      res = await fetch(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      throw toProviderError(err);
+    }
+    if (!res.ok) throw await errorFromResponse('anthropic', res);
+    return res;
+  };
+
   return {
     async chat(req: ChatRequest, signal: AbortSignal): Promise<ChatResponse> {
-      const body = toAnthropic(req, defaultMaxTokens);
-      let res: Response;
+      const res = await post(toAnthropic(req, defaultMaxTokens), signal);
+      return fromAnthropic((await res.json()) as AnthropicResponse);
+    },
+
+    async *stream(req: ChatRequest, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+      const res = await post({ ...toAnthropic(req, defaultMaxTokens), stream: true }, signal);
       try {
-        res = await fetch(`${baseUrl}/v1/messages`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify(body),
-          signal,
-        });
+        yield* fromAnthropicStream(parseSse(res.body!));
       } catch (err) {
         throw toProviderError(err);
       }
-      if (!res.ok) throw await errorFromResponse('anthropic', res);
-      return fromAnthropic((await res.json()) as AnthropicResponse);
     },
   };
 }

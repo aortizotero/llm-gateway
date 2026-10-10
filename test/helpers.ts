@@ -13,7 +13,7 @@ export const config: Config = {
     backup: { type: 'openai-compat', baseUrl: 'http://unused', keyEnv: 'UNUSED' },
   },
   aliases: { smart: ['primary:model-a', 'backup:model-b'] },
-  timeouts: { perHopMs: 100 },
+  timeouts: { perHopMs: 100, firstTokenMs: 100 },
   breaker: { window: 20, minFailures: 5, failureRate: 0.5, openMs: 30000 },
   defaults: { maxTokens: 100, maxTokensCeiling: 1000, rpm: 1e6, tpm: 1e9, monthlyBudgetUsd: 50 },
 };

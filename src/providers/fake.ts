@@ -1,11 +1,13 @@
 import { ProviderError } from '../errors.ts';
-import type { ChatRequest, ChatResponse, ProviderAdapter } from './types.ts';
+import type { ChatRequest, ChatResponse, ProviderAdapter, StreamChunk } from './types.ts';
 
 export interface FakeOptions {
   failRate?: number; // 0..1 share of calls that fail (default 0)
   failStatus?: number; // status of a failed call (default 503)
   latencyMs?: number; // also used to simulate hangs: set it above the gateway's per-hop timeout
-  reply?: string;
+  reply?: string; // streamed one word per chunk
+  chunkDelayMs?: number; // pause between streamed content chunks (not before the first)
+  failAfterChunks?: number; // stream: fail mid-response after this many content chunks
   seed?: number; // fixed seed keeps tests and benchmarks reproducible
 }
 
@@ -29,12 +31,21 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+const defaults = { failRate: 0, failStatus: 503, latencyMs: 0, reply: 'ok', seed: 1 };
+
 // Deterministic stand-in for a real provider. Tests and the chaos bench use it; never real APIs.
 // `set()` changes behaviour mid-run (e.g. the provider goes down, then recovers).
 export function fake(initial: FakeOptions = {}) {
-  let opts = { failRate: 0, failStatus: 503, latencyMs: 0, reply: 'ok', seed: 1, ...initial };
+  let opts: FakeOptions & typeof defaults = { ...defaults, ...initial };
   let random = rng(opts.seed);
   const calls: ChatRequest[] = [];
+
+  const start = async (req: ChatRequest, signal: AbortSignal) => {
+    calls.push(req);
+    if (opts.latencyMs) await sleep(opts.latencyMs, signal);
+    signal.throwIfAborted();
+    if (random() < opts.failRate) throw new ProviderError(opts.failStatus, `fake failure ${opts.failStatus}`);
+  };
 
   const adapter: ProviderAdapter & { calls: ChatRequest[]; set(o: FakeOptions): void } = {
     calls,
@@ -42,11 +53,25 @@ export function fake(initial: FakeOptions = {}) {
       opts = { ...opts, ...o };
       if (o.seed !== undefined) random = rng(o.seed);
     },
+
+    async *stream(req: ChatRequest, signal: AbortSignal): AsyncGenerator<StreamChunk> {
+      await start(req, signal);
+      const base = { id: `fake-${calls.length}`, object: 'chat.completion.chunk' as const, created: 0, model: req.model };
+      const words = opts.reply.split(' ');
+      yield { ...base, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] };
+      for (const [i, word] of words.entries()) {
+        if (opts.failAfterChunks !== undefined && i >= opts.failAfterChunks) {
+          throw new ProviderError(opts.failStatus, `fake mid-stream failure ${opts.failStatus}`);
+        }
+        if (opts.chunkDelayMs && i) await sleep(opts.chunkDelayMs, signal);
+        yield { ...base, choices: [{ index: 0, delta: { content: i ? ` ${word}` : word }, finish_reason: null }] };
+      }
+      yield { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+      yield { ...base, choices: [], usage: { prompt_tokens: 10, completion_tokens: words.length, total_tokens: 10 + words.length } };
+    },
+
     async chat(req: ChatRequest, signal: AbortSignal): Promise<ChatResponse> {
-      calls.push(req);
-      if (opts.latencyMs) await sleep(opts.latencyMs, signal);
-      signal.throwIfAborted();
-      if (random() < opts.failRate) throw new ProviderError(opts.failStatus, `fake failure ${opts.failStatus}`);
+      await start(req, signal);
       return {
         id: `fake-${calls.length}`,
         object: 'chat.completion',

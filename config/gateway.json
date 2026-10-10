@@ -7,7 +7,7 @@
     "smart": ["anthropic:claude-sonnet-5-5", "google:gemini-3.6-flash"],
     "fast": ["anthropic:claude-haiku-5-5", "google:gemini-3.1-flash-lite"]
   },
-  "timeouts": { "perHopMs": 30000 },
+  "timeouts": { "perHopMs": 30000, "firstTokenMs": 15000 },
   "breaker": { "window": 20, "minFailures": 5, "failureRate": 0.5, "openMs": 30000 },
   "defaults": { "maxTokens": 1024, "maxTokensCeiling": 8192, "rpm": 60, "tpm": 100000, "monthlyBudgetUsd": 50 }
 }

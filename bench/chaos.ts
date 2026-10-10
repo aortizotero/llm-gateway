@@ -36,7 +36,7 @@ const config: Config = {
     backup: { type: 'openai-compat', baseUrl: 'http://fake', keyEnv: 'UNUSED' },
   },
   aliases: { smart: ['primary:model-a', 'backup:model-b'] },
-  timeouts: { perHopMs: PER_HOP_MS },
+  timeouts: { perHopMs: PER_HOP_MS, firstTokenMs: PER_HOP_MS },
   breaker: BREAKER,
   defaults: { maxTokens: 1024, maxTokensCeiling: 8192, rpm: 1e9, tpm: 1e12, monthlyBudgetUsd: 1e6 },
 };
