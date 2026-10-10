@@ -1,0 +1,43 @@
+import { readFileSync } from 'node:fs';
+import type { BreakerConfig } from './breaker.ts';
+import { anthropic } from './providers/anthropic.ts';
+import { openaiCompat } from './providers/openai-compat.ts';
+import type { ProviderAdapter } from './providers/types.ts';
+
+export interface ProviderConfig {
+  type: 'anthropic' | 'openai-compat';
+  baseUrl: string;
+  keyEnv: string;
+}
+
+export interface Config {
+  providers: Record<string, ProviderConfig>;
+  aliases: Record<string, string[]>;
+  timeouts: { perHopMs: number };
+  breaker: BreakerConfig;
+  defaults: { maxTokens: number; rpm: number; tpm: number; monthlyBudgetUsd: number };
+}
+
+export function loadConfig(path = 'config/gateway.json'): Config {
+  const config = JSON.parse(readFileSync(path, 'utf8')) as Config;
+  for (const [alias, chain] of Object.entries(config.aliases)) {
+    if (!chain.length) throw new Error(`Alias "${alias}" has an empty chain`);
+    for (const hop of chain) {
+      const provider = hop.split(':')[0];
+      if (!config.providers[provider]) throw new Error(`Alias "${alias}" references unknown provider "${provider}"`);
+    }
+  }
+  return config;
+}
+
+// Fails at startup, not on the first request, when a provider key is missing.
+export function buildAdapters(config: Config, env: NodeJS.ProcessEnv = process.env): Record<string, ProviderAdapter> {
+  const adapters: Record<string, ProviderAdapter> = {};
+  for (const [name, p] of Object.entries(config.providers)) {
+    const key = env[p.keyEnv];
+    if (!key) throw new Error(`Missing env var ${p.keyEnv} for provider "${name}"`);
+    adapters[name] =
+      p.type === 'anthropic' ? anthropic(p.baseUrl, key, config.defaults.maxTokens) : openaiCompat(name, p.baseUrl, key);
+  }
+  return adapters;
+}
