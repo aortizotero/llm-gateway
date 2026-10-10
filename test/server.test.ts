@@ -100,6 +100,19 @@ test('unsupported features and bad bodies are 400', async () => {
   assert.equal((await call({ model: 'smart', messages: [] })).status, 400);
 });
 
+test('health probes need no key; readiness fails when the database is gone', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const { openDb } = await import('../src/db.ts');
+  const { config, pricing } = await import('./helpers.ts');
+  const db = openDb(':memory:');
+  const app = createApp({ config, pricing, db, adapters: {}, log: false });
+  assert.equal((await app.request('/healthz')).status, 200);
+  assert.equal((await app.request('/readyz')).status, 200);
+  db.raw.close();
+  assert.equal((await app.request('/healthz')).status, 200);
+  assert.equal((await app.request('/readyz')).status, 503);
+});
+
 test('every response carries the security headers', async () => {
   const { call } = setup();
   const res = await call(chat());

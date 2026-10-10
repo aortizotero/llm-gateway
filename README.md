@@ -1,18 +1,105 @@
 # LLM Gateway
 
-Self-hosted, OpenAI-compatible gateway for running LLMs in production across teams or customers: per-tenant keys, budgets and rate limits, provider fallback with circuit breakers, and a real-time cost ledger.
+A self-hosted, OpenAI-compatible gateway that lets one company run AI features for many customers on several LLM providers, **without single-provider outages, runaway spend, or one customer starving the others**.
 
-> Status: **M4 (streaming) done** — OpenAI-compatible endpoint with streaming, Anthropic + Google Gemini adapters, provider fallback with circuit breakers (also for streams, before the first token), per-tenant keys, rate limits and strict monthly budgets, real-time cost ledger, admin API. Packaging and deployment come in M5. Design docs: [`PRD`](docs/PRD.md) · [`Architecture`](docs/ARCHITECTURE.md) · [`Rules`](docs/RULES.md) · [`Use cases`](docs/USE_CASES.md).
+Built as a working answer to a question every AI platform owner faces: *what has to sit between our products and the model providers once real customers depend on them?*
 
-## Quick start
+[Product requirements](docs/PRD.md) · [Architecture & decision log](docs/ARCHITECTURE.md) · [Engineering rules](docs/RULES.md) · [Use cases](docs/USE_CASES.md)
 
-Requires Node.js ≥ 24 (TypeScript runs natively, no build step).
+---
 
-```bash
-npm install
-```
+## The problem
 
-Create a `.env` file in the project root:
+Picture a B2B company running a fleet of AI bots (support, sales, onboarding) for hundreds of business customers ([scenario A](docs/USE_CASES.md)). Once that is in production, four problems show up:
+
+| Problem | Business impact |
+|---|---|
+| **Provider outages.** Every major LLM provider has incidents. | Every customer's bot goes down at once, and SLAs are breached. |
+| **Runaway cost.** A retry loop or one heavy customer can burn a month's budget in hours. | Margin erosion that nobody sees until next month's invoice, with no per-customer breakdown. |
+| **No fair sharing.** One shared provider key means one noisy customer exhausts rate limits for everyone. | Good customers get degraded service because of someone else. |
+| **Key sprawl.** Provider keys copied into every service. | Rotating or revoking a key becomes a project in itself. |
+
+## What it does
+
+Applications call **one OpenAI-compatible endpoint** with a per-customer key. For each request the gateway:
+
+1. Authenticates the customer (tenant) and enforces **their** rate limits.
+2. **Reserves the worst-case cost** against their monthly budget before spending any money.
+3. Routes the request through an ordered **fallback chain** of providers (Anthropic → Google Gemini), skipping any provider whose **circuit breaker** is open.
+4. Streams the answer back. Fallback still works on streams, as long as the first token hasn't been sent.
+5. Settles the actual cost and writes it to a **per-customer ledger** in real time.
+
+Provider keys live only in the gateway. Switching an existing app over takes one line: change the OpenAI SDK's `base_url`.
+
+## Results
+
+Measured with a chaos benchmark (fake providers with injected failures, 2,000 requests). Full table [below](#resilience-benchmark).
+
+| Scenario | Without gateway | With gateway |
+|---|---|---|
+| Primary provider fully down | 0% of requests succeed | **100%** |
+| Primary provider failing 30% of the time | 70.2% | **100%** |
+| Primary provider hanging | every request waits for the timeout | **p95 0.3 ms**: the breaker stops sending traffic after 24 requests |
+| Overhead added by the gateway | — | **4.1 ms at p95** |
+| 50 concurrent requests against a small budget | — | **0 overspend**: exactly as many admitted as fit |
+
+63 automated tests, plus smoke tests against the real Anthropic and Gemini APIs at every milestone.
+
+## Key decisions and trade-offs
+
+Each of these is logged with the rejected alternatives in the [decision log](docs/ARCHITECTURE.md#10-decisions-log).
+
+- **Strict budgets over approximate ones.** The gateway reserves each request's worst-case cost *before* calling the provider and settles to the actual cost afterwards. The simpler check-then-charge approach lets concurrent requests overspend. The cost is that a customer near their limit gets refused for large requests that would probably have fit.
+- **A circuit breaker that accepts a known weakness.** It sometimes trips on a provider that is only partly failing, which costs some success under partial failure (89.8% vs. ~97% in one benchmark row). In exchange it saves seconds of latency on every request when a provider hangs. I documented the trade-off rather than tuning it away, because the alternatives either detect dead providers more slowly or reintroduce the long hangs.
+- **No fallback after the first token.** You cannot un-send text. Streams fail over invisibly before the first token and fail loudly after it.
+- **When in doubt, charge the reservation.** If a stream is cut and the provider never reports usage, the customer is charged the reserved worst case. Under-charging silently loses money; over-charging is visible in the ledger and can be refunded.
+- **Boring infrastructure for v1.** One process, SQLite, two runtime dependencies, no SDKs from the providers (their built-in retries would hide failures from the breaker). Multi-instance (Redis/Postgres) is a deliberate v2 step, not a v1 requirement.
+
+## What real providers taught me
+
+These came from smoke tests against live APIs, not from documentation. Each one changed the design.
+
+1. **Hidden reasoning tokens are billed but not reported.** Gemini reported 7 output tokens for a call that billed 786; the rest were "thinking" tokens left out of `completion_tokens`. A gateway that trusts the reported field under-counts cost by about 100× on these calls.
+2. **`max_tokens` is not a hard cap on every provider.** Gemini billed 76 tokens against a limit of 50. Budgets now apply a per-provider overrun factor.
+3. **A response can be empty and still billed.** With `max_tokens: 300`, Gemini spent 303 tokens thinking and returned no text.
+4. **Models disappear from price lists.** `gemini-3.5-flash` still answered requests but was no longer on Google's pricing page, so its cost could no longer be computed. The gateway now refuses to start if any model in a fallback chain has no price.
+5. **Prices change on a schedule.** Gemini 3.6 Flash doubles its price on 2027-01-01. The pricing file supports dated price periods so the change is already encoded.
+6. **Overload is routine.** One Gemini model returned `503 high demand` or took 38 s to answer during testing. That is the case the fallback chain exists for.
+
+## Build vs. buy
+
+In a real company I would most likely **adopt an existing gateway**, not build one. Mature options exist:
+
+- [LiteLLM](https://docs.litellm.ai/docs/proxy/architecture.md) is an open-source proxy with virtual keys, per-key and per-team budgets, rate limits and fallbacks (keys need Postgres).
+- [Portkey](https://portkey.ai/docs/product/ai-gateway) is a managed gateway with fallback configs and circuit breakers. Its [budget limits](https://portkey.ai/docs/product/ai-gateway/virtual-keys/budget-limits) are tied to higher plans, and models it doesn't price don't count toward them.
+- [OpenRouter](https://openrouter.ai/docs/guides/routing) is a hosted router with model fallback lists, billed per model that served the request.
+
+Building one taught me **which questions to ask in that evaluation**. This project's answers are in parentheses:
+
+| Question to ask a vendor | Why it matters |
+|---|---|
+| Is the budget enforced **before** the call or reconciled **after**? (before) | After-the-fact enforcement overshoots under concurrency. |
+| How are **thinking tokens** counted, and does `max_tokens` bound them? (counted from `total − prompt`; overrun factor) | A gateway that misses them under-reports cost by orders of magnitude. |
+| What happens to a **stream that fails mid-response**? (error event, never retried, charged conservatively) | Silent retries duplicate text; silent drops lose money. |
+| Which errors trigger **fallback**, and which pass through? (provider failures and a bad provider key fall back; client errors don't) | Retrying a bad request on every provider multiplies cost and latency. |
+| What happens to a model that **isn't in the price table**? (refused) | Unpriced models can be free-riding outside the budget. |
+| Can the ledger answer **"what did customer X cost us this month, per model?"** (yes, `/admin/usage`) | That question decides pricing and margins. |
+
+## If this ran at scale
+
+- **Multiple instances:** move rate limits and breaker state to Redis and the ledger to Postgres. The interfaces are already isolated to one file each.
+- **Cost-aware routing:** send simple requests to cheaper models automatically (planned for v2).
+- **Guardrails:** PII redaction and prompt-injection checks as pre-request hooks (v2).
+- **Data residency:** pin EU or regulated customers to region-specific endpoints, with the ledger as the audit trail (v3).
+- **Price feed:** replace the hand-maintained `pricing.json` with a reviewed sync job. Prices change too often to keep by hand.
+
+---
+
+## Running it
+
+Requires Node.js ≥ 24 (TypeScript runs natively, no build step) or Docker.
+
+Create a `.env` file:
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -22,78 +109,65 @@ Create a `.env` file in the project root:
 | `DB_PATH` | no | SQLite file, default `data/gateway.db` |
 | `PORT` | no | Default `8787` |
 
-Create a tenant and its gateway key (shown once):
-
 ```bash
-npm run create-key -- "Acme Corp"
-```
-
-Start the gateway and call it like the OpenAI API:
-
-```bash
+# Node
+npm install
+npm run create-key -- "Acme Corp"   # prints a gateway key, shown once
 npm start
 
-curl http://localhost:8787/v1/chat/completions \
-  -H "Authorization: Bearer gw_..." \
-  -H "Content-Type: application/json" \
-  -d '{"model": "smart", "messages": [{"role": "user", "content": "Hello"}]}'
+# or Docker (SQLite persisted in a named volume)
+docker build -t llm-gateway .
+docker run --env-file .env -p 8787:8787 -v llm-gateway-data:/data llm-gateway
 ```
 
-`model` is an alias from `config/gateway.json` (`smart`, `fast`) or a concrete `provider:model` such as `google:gemini-3.5-flash`.
+Call it like the OpenAI API. `model` is an alias from `config/gateway.json` (`smart`, `fast`) or a concrete `provider:model` such as `google:gemini-3.6-flash`:
 
-Any OpenAI SDK works by pointing `base_url` at the gateway:
+```bash
+curl http://localhost:8787/v1/chat/completions \
+  -H "Authorization: Bearer gw_..." -H "Content-Type: application/json" \
+  -d '{"model": "smart", "messages": [{"role": "user", "content": "Hello"}]}'
+```
 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8787/v1", api_key="gw_...")
 ```
 
-Every proxied response carries `x-gateway-provider` (who answered), `x-gateway-attempts` and, for non-streaming calls, `x-gateway-cost-usd`.
+Every proxied response carries `x-gateway-provider` (who answered), `x-gateway-attempts` and, for non-streaming calls, `x-gateway-cost-usd`. `GET /healthz` and `GET /readyz` are the liveness and readiness probes.
 
 ### Streaming
 
-`"stream": true` works as with OpenAI (server-sent events ending in `data: [DONE]`). Fallback still applies, but only **before the first token**: the gateway reads each provider until it produces real output, so a provider that errors or stays silent past `firstTokenMs` is skipped without the client noticing. After the first token is sent, a provider failure ends the stream with an error event; it cannot be retried without sending duplicate text.
+`"stream": true` works as with OpenAI (server-sent events ending in `data: [DONE]`). The gateway reads each provider until it produces real output, so a provider that errors or stays silent past `firstTokenMs` is skipped without the client noticing. After the first token, a provider failure ends the stream with an error event.
 
-> **Gemini thinking models and `max_tokens`:** thinking tokens count against `max_tokens`. With `max_tokens: 300`, `gemini-3.6-flash` spent 303 tokens thinking and returned an empty answer, which was still billed. Give Gemini a generous `max_tokens`.
+> **Gemini thinking models:** thinking tokens count against `max_tokens`. Give Gemini a generous `max_tokens`, or answers can come back empty and still be billed.
 
-## Tenants, budgets and rate limits
+### Tenants, budgets and rate limits
 
-Each tenant (one per customer account in the B2B bot-fleet scenario) has its own keys, a monthly USD budget, and requests/min + tokens/min limits.
+Each tenant (one per customer account) has its own keys, a monthly USD budget, and requests/min + tokens/min limits.
 
 ```bash
 ADMIN="Authorization: Bearer $GATEWAY_ADMIN_KEY"
-
-# Create a tenant (defaults from config/gateway.json for anything omitted)
-curl -X POST localhost:8787/admin/tenants -H "$ADMIN" -H "Content-Type: application/json" \
-  -d '{"name": "Acme Corp", "monthlyBudgetUsd": 200, "rpm": 120}'
-
-# Issue a key (returned once), revoke a key, change limits
-curl -X POST   localhost:8787/admin/tenants/<tenant-id>/keys -H "$ADMIN"
+curl -X POST   localhost:8787/admin/tenants -H "$ADMIN" -H "Content-Type: application/json" -d '{"name": "Acme Corp", "monthlyBudgetUsd": 200, "rpm": 120}'
+curl -X POST   localhost:8787/admin/tenants/<tenant-id>/keys -H "$ADMIN"    # key returned once
 curl -X DELETE localhost:8787/admin/keys/<key-id> -H "$ADMIN"
 curl -X PATCH  localhost:8787/admin/tenants/<tenant-id> -H "$ADMIN" -H "Content-Type: application/json" -d '{"monthlyBudgetUsd": 500}'
-
-# Spend this month, broken down by provider and model; circuit breaker states
-curl "localhost:8787/admin/usage?tenant=<tenant-id>&period=2026-10" -H "$ADMIN"
+curl "localhost:8787/admin/usage?tenant=<tenant-id>&period=2026-10" -H "$ADMIN"   # spend by provider and model
 curl localhost:8787/admin/breakers -H "$ADMIN"
 ```
 
 | Situation | Response |
 |---|---|
 | Over requests/min or tokens/min | `429` + `Retry-After` |
-| Worst-case cost of the request doesn't fit in the remaining budget | `402`, no provider called |
+| Worst-case cost doesn't fit in the remaining budget | `402`, no provider called |
 | Every provider in the chain failed | `503` with the attempt trail |
 
-**How budgets stay strict.** Before calling a provider, the gateway reserves the request's worst-case cost (input estimate + `max_tokens`, at the most expensive model in the fallback chain) and swaps it for the actual cost afterwards. Fifty concurrent requests against a small budget admit exactly as many as fit, never more (see `test/governance.test.ts`). Gemini sometimes bills more than `max_tokens` because of thinking tokens (76 for a limit of 50 in testing), so its reservations use a 2× overrun factor.
+Prices come from [`config/pricing.json`](config/pricing.json), copied from each provider's pricing page with the date checked.
 
-Prices come from `config/pricing.json`, copied from each provider's pricing page with the date checked, including announced price changes and long-context tiers.
-
-## Tests
+### Tests
 
 ```bash
-npm test
+npm test   # 63 tests; fake providers only, never real APIs
 ```
-
-Tests use a fake provider and never call real APIs.
 
 ## Resilience benchmark
 

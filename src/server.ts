@@ -76,6 +76,17 @@ export function createApp(deps: AppDeps) {
 
   app.route('/admin', adminRoutes({ db, config, breakers, adminKey }));
 
+  // Liveness: the process answers. Readiness: it can also reach its database.
+  app.get('/healthz', (c) => c.json({ status: 'ok' }));
+  app.get('/readyz', (c) => {
+    try {
+      db.raw.prepare('SELECT 1').get();
+      return c.json({ status: 'ready' });
+    } catch {
+      return c.json({ status: 'unavailable', reason: 'database' }, 503);
+    }
+  });
+
   app.post('/v1/chat/completions', async (c) => {
     const started = performance.now();
     const tenant = authenticate(c, db);

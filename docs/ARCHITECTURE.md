@@ -168,7 +168,8 @@ Errors use the OpenAI error shape: `{ "error": { "message", "type", "code" } }`.
 ## 9. Deployment
 
 - `Dockerfile` (node:24-slim), SQLite file on a mounted volume `/data`.
-- Any container host behind HTTPS (reference deployment: Coolify). Secrets as host env vars.
+- Runs on any container host that keeps one long-lived process and a persistent volume (a VPS with Coolify, Fly.io, Railway). Serverless platforms do not fit: no shared memory for breakers and rate limits, no persistent disk. Secrets as host env vars.
+- No public demo instance is hosted: a public endpoint holding real provider keys is spend exposure with no portfolio upside. The benchmark and tests are the evidence.
 - Security headers set in the app (no `vercel.json` here) per `docs/RULES.md`.
 
 ## 10. Decisions log
@@ -187,3 +188,4 @@ Errors use the OpenAI error shape: `{ "error": { "message", "type", "code" } }`.
 | 2026-10-10 | Gemini smart backup moved to `gemini-3.6-flash` | `gemini-3.5-flash`: no longer on Google's pricing page, so its cost can't be computed |
 | 2026-10-10 | Streaming commits on first real output; separate `firstTokenMs` and idle (`perHopMs`) timeouts | One total timeout: would either kill long answers or wait too long for a dead provider |
 | 2026-10-10 | Cut streams (502/499) are charged the full reservation | Charge 0 or estimate from streamed text: providers bill partial output, and thinking tokens are invisible |
+| 2026-10-10 | No hosted demo; ship a Docker image and a README written for decision-makers | Public demo with real provider keys (spend exposure); demo tenant with a tiny budget (still a public key surface) |

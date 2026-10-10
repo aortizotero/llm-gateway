@@ -91,7 +91,7 @@ Provider keys live only in the gateway.
 | **M2 — Resilience** | F3, F4, F6, F14 fake provider | Chaos bench shows fallback working |
 | **M3 — Governance** | F8, F9, F11 | Budget and rate limit tests pass under concurrency |
 | **M4 — Streaming** | F1 stream, F5 | Streaming fallback test passes |
-| **M5 — Ship** | F12, F13, Dockerfile, deploy, README with bench numbers | Public repo + live demo URL |
+| **M5 — Ship** | F12, F13, Dockerfile, README for a decision-maker audience with bench numbers | Public repo; image builds and passes its health check. No hosted demo (see ARCHITECTURE decisions log) |
 
 ## 9. Roadmap after v1
 
