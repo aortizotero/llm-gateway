@@ -10,6 +10,8 @@ const FINISH_REASONS: Record<string, string> = {
   refusal: 'content_filter',
 };
 
+const DEFAULT_SAMPLING_ONLY = /^claude-(haiku-5|sonnet-5|opus-5|opus-4-[78]|fable|mythos)/;
+
 function textOf(msg: ChatMessage): string {
   if (msg.content == null) return '';
   if (typeof msg.content === 'string') return msg.content;
@@ -36,8 +38,11 @@ export function toAnthropic(req: ChatRequest, defaultMaxTokens: number) {
     max_tokens: req.max_completion_tokens ?? req.max_tokens ?? defaultMaxTokens,
   };
   if (system.length) body.system = system.join('\n\n');
-  if (req.temperature !== undefined) body.temperature = req.temperature;
-  if (req.top_p !== undefined) body.top_p = req.top_p;
+  // Current-generation models 400 on non-default sampling values, so only older ones get them.
+  if (!DEFAULT_SAMPLING_ONLY.test(req.model)) {
+    if (req.temperature !== undefined) body.temperature = req.temperature;
+    if (req.top_p !== undefined) body.top_p = req.top_p;
+  }
   if (req.stop !== undefined) body.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
   return body;
 }

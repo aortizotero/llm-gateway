@@ -29,6 +29,16 @@ test('max_completion_tokens wins over max_tokens', () => {
   assert.equal(body.max_tokens, 20);
 });
 
+test('sampling params are dropped for models that only accept defaults', () => {
+  const req = { messages: [{ role: 'user' as const, content: 'x' }], temperature: 0.2, top_p: 0.9 };
+  const current = toAnthropic({ ...req, model: 'claude-haiku-5-5' }, 1024);
+  assert.equal(current.temperature, undefined);
+  assert.equal(current.top_p, undefined);
+  const legacy = toAnthropic({ ...req, model: 'claude-haiku-4-5' }, 1024);
+  assert.equal(legacy.temperature, 0.2);
+  assert.equal(legacy.top_p, 0.9);
+});
+
 test('non-text content parts are rejected as a client error', () => {
   assert.throws(
     () => toAnthropic({ model: 'm', messages: [{ role: 'user', content: [{ type: 'image_url' }] }] }, 1024),
